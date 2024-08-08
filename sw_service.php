@@ -31,7 +31,8 @@ use OpenSwoole\WebSocket\CloseFrame as oswCloseFrame;
 use Swoole\Timer as swTimer;
 use OpenSwoole\Timer as oswTimer;
 
-use OpenSwoole\Constant;
+use Swoole\Constant as swConstant;
+use OpenSwoole\Constant as oswConstant;
 
 // OR Through Scheduler
 //$sch = new Swoole\Coroutine\Scheduler();
@@ -62,7 +63,7 @@ class sw_service {
     protected $port;
     protected $serverMode;
     protected $serverProtocol;
-    protected $fds=[];
+    protected static $fds=[];
 
    function __construct($ip, $port, $serverMode, $serverProtocol) {
 
@@ -195,11 +196,17 @@ class sw_service {
     }
 
     protected function bindServerEvents() {
-        $my_onStart = function ($serv)
+        $my_onStart = function ($server)
         {
             $this->swoole_version = (($this->swoole_ext == 1) ? SWOOLE_VERSION : '22.1.2');
+//            $file = __DIR__.'/sw-heartbeat.pid';
+//            $fp = fopen($file, 'w');
+//            fclose($fp);
+//            chmod($file, 0777);
+
+            file_put_contents(__DIR__.'/sw-heartbeat.pid', $server->master_pid);
             echo "Asynch ". ucfirst($this->serverProtocol)." Server started at $this->ip:$this->port in Server Mode:$this->serverMode\n";
-            echo "MasterPid={$serv->master_pid}|Manager_pid={$serv->manager_pid}\n".PHP_EOL;
+            echo "MasterPid={$server->master_pid}|Manager_pid={$server->manager_pid}\n".PHP_EOL;
             echo "Server: start.".PHP_EOL."Swoole version is [" . $this->swoole_version . "]\n".PHP_EOL;
         };
 
@@ -216,13 +223,41 @@ class sw_service {
         $this->server->on('BeforeReload', function($server)
         {
             echo "Test Statement: Before Reload". PHP_EOL;
+            dump(self::$fds);
 //            var_dump(get_included_files());
+//            if ($this->swoole_ext == 1) {
+//                if (swTimer::clearAll()) {
+//                    echo PHP_EOL."Before Reload: Cleared All Swoole-based Timers".PHP_EOL;
+//                } else {
+//                    echo PHP_EOL."Before Reload: Could not clear Swoole-based Timers".PHP_EOL;
+//                }
+//            } else {
+//                if (oswTimer::clearAll()) {
+//                    echo PHP_EOL."Before Reload: Cleared All OpenSwoole-based Timers".PHP_EOL;
+//                } else {
+//                    echo PHP_EOL."Before Reload: Could not clear OpenSwoole-based Timers".PHP_EOL;
+//                }
+//            }
         });
 
         $this->server->on('AfterReload', function($server)
         {
-            echo "Test Statement: After Reload". PHP_EOL;
+            echo PHP_EOL."Test Statement: After Reload". PHP_EOL;
+            dump(self::$fds);
 //            var_dump(get_included_files());
+//            if ($this->swoole_ext == 1) {
+//                if (swTimer::clearAll()) {
+//                    echo PHP_EOL."AfterReload: Cleared All Swoole-based Timers".PHP_EOL;
+//                } else {
+//                    echo PHP_EOL."AfterReload: Could not clear Swoole-based Timers".PHP_EOL;
+//                }
+//            } else {
+//                if (oswTimer::clearAll()) {
+//                    echo PHP_EOL."AfterReload: Cleared All OpenSwoole-based Timers".PHP_EOL;
+//                } else {
+//                    echo PHP_EOL."AfterReload: Could not clear OpenSwoole-based Timers".PHP_EOL;
+//                }
+//            }
         });
     }
 
@@ -379,20 +414,21 @@ class sw_service {
 
         // This callback will be used in callback for onMessage event. next
         $respond = function($timerId, $webSocketServer, $frame, $sw_websocket_controller) {
-            if (isset($this->fds[$frame->fd])) { // if the user / fd is connected then push else clear timer.
+            if (isset($frame->fd) && isset(self::$fds[$frame->fd])) { // if the user / fd is connected then push else clear timer.
                 if ($frame->data) { // when a new message arrives from connected client with some data in it
                     $bl_response = $sw_websocket_controller->handle();
                     $frame->data = false;
                 } else {
                     $bl_response = 1;
                 }
+
                 $webSocketServer->push($frame->fd,
                     json_encode($bl_response),
                     WEBSOCKET_OPCODE_TEXT,
                     SWOOLE_WEBSOCKET_FLAG_FIN); // SWOOLE_WEBSOCKET_FLAG_FIN OR OpenSwoole\WebSocket\Server::WEBSOCKET_FLAG_FIN
 
             } else {
-                echo "Clearing Timer ".$timerId.PHP_EOL;
+                echo "Inside Event's Callback: Clearing Timer ".$timerId.PHP_EOL;
                 if ($this->swoole_ext == 1) {
                     swTimer::clear($timerId);
                 } else {
@@ -401,11 +437,11 @@ class sw_service {
             }
         };
         $this->server->on('message', function($webSocketServer, $frame) use ($respond) {
-//            if (isset($this->fds[$frame->fd])) {
-//                if(class_exists(swTimer::class) && swTimer::exists($this->fds[$frame->fd])){
-//                    swTimer::clear($this->fds[$frame->fd]);
-//                } else if (class_exists(oswTimer::class) && oswTimer::exists($this->fds[$frame->fd])) {
-//                    oswTimer::clear($this->fds[$frame->fd]);
+//            if (isset(self::$fds[$frame->fd])) {
+//                if(class_exists(swTimer::class) && swTimer::exists(self::$fds[$frame->fd])){
+//                    swTimer::clear(self::$fds[$frame->fd]);
+//                } else if (class_exists(oswTimer::class) && oswTimer::exists(self::$fds[$frame->fd])) {
+//                    oswTimer::clear(self::$fds[$frame->fd]);
 //                }
 //            }
 
@@ -429,31 +465,93 @@ class sw_service {
                     }
                 }
 
-                include_once __DIR__ . '/Controllers/WebSocketController.php';
-
-                global $app_type_database_driven;
-                if ($app_type_database_driven) {
-                    $sw_websocket_controller = new WebSocketController($webSocketServer, $frame, $this->dbConnectionPools[$webSocketServer->worker_id]);
+                if ($frame->data == 'reload-code') {
+                    if ($this->swoole_ext == 1) { // for Swoole
+                        echo PHP_EOL.'In Reload-Code: Clearing All Swoole-based Timers'.PHP_EOL;
+                        swTimer::clearAll();
+                    } else { // for openSwoole
+                        echo PHP_EOL.'In Reload-Code: Clearing All OpenSwoole-based Timers'.$fd.PHP_EOL;
+                        oswTimer::clearAll();
+                    }
+//                    self::$fds = null;
+//                    unset($frame);
+                    echo "Reloading Code Changes (by Reloading All Workers)".PHP_EOL;
+                    $webSocketServer->reload();
                 } else {
-                    $sw_websocket_controller = new WebSocketController($webSocketServer, $frame);
-                }
+                    include_once __DIR__ . '/Controllers/WebSocketController.php';
 
-                $timerTime = $_ENV['SWOOLE_TIMER_TIME1'];
-                if ($this->swoole_ext == 1) {
-                    $this->fds[$frame->fd] = swTimer::tick($timerTime, $respond, $webSocketServer, $frame, $sw_websocket_controller);
-                } else {
-                    $this->fds[$frame->fd] = oswTimer::tick($timerTime, $respond, $webSocketServer, $frame, $sw_websocket_controller);
+                    global $app_type_database_driven;
+                    if ($app_type_database_driven) {
+                        $sw_websocket_controller = new WebSocketController($webSocketServer, $frame, $this->dbConnectionPools[$webSocketServer->worker_id]);
+                    } else {
+                        $sw_websocket_controller = new WebSocketController($webSocketServer, $frame);
+                    }
+
+                    $timerTime = $_ENV['SWOOLE_TIMER_TIME1'];
+                    if ($this->swoole_ext == 1) {
+                        self::$fds[$frame->fd][] = swTimer::tick($timerTime, $respond, $webSocketServer, $frame, $sw_websocket_controller);
+                    } else {
+                        self::$fds[$frame->fd][] = oswTimer::tick($timerTime, $respond, $webSocketServer, $frame, $sw_websocket_controller);
+                    }
                 }
             }
         });
 
         $this->server->on('close', function($server, $fd, $reactorId) {
-            echo "client {$fd} closed\n in ReactorId:{$reactorId}";
-            unset($this->fds[$fd]);
+            echo PHP_EOL."client {$fd} closed in ReactorId:{$reactorId}".PHP_EOL;
+
+            if ($this->swoole_ext == 1) {
+                if (isset(self::$fds[$fd])) {
+                    echo PHP_EOL.'On Close: Clearing Swoole-based Timers for Connection-'.$fd.PHP_EOL;
+                    $fd_timers = self::$fds[$fd];
+                    foreach ($fd_timers as $fd_timer){
+                        if (swTimer::exists($fd_timer)) {
+                            echo PHP_EOL."In Connection-Close: clearing timer: ".$fd_timer.PHP_EOL;
+                            swTimer::clear($fd_timer);
+                        }
+                    }
+                }
+            } else {
+                if (isset(self::$fds[$fd])) {
+                    echo PHP_EOL.'On Close: Clearing OpenSwoole-based Timers for Connection-'.$fd.PHP_EOL;
+                    $fd_timers = self::$fds[$fd];
+                    foreach ($fd_timers as $fd_timer){
+                        if (oswTimer::exists($fd_timer)) {
+                            echo PHP_EOL."In Connection-Close: clearing timer: ".$fd_timer.PHP_EOL;
+                            oswTimer::clear($fd_timer);
+                        }
+                    }
+                }
+            }
+            unset(self::$fds[$fd]);
         });
 
         $this->server->on('disconnect', function(Server $server, int $fd) {
             echo "connection disconnect: {$fd}\n";
+            if ($this->swoole_ext == 1) {
+                if (isset(self::$fds[$fd])) {
+                    echo PHP_EOL.'On Disconnect: Clearing Swoole-based Timers for Connection-'.$fd.PHP_EOL;
+                    $fd_timers = self::$fds[$fd];
+                    foreach ($fd_timers as $fd_timer){
+                        if (swTimer::exists($fd_timer)) {
+                            echo PHP_EOL."In Disconnect: clearing timer: ".$fd_timer.PHP_EOL;
+                            swTimer::clear($fd_timer);
+                        }
+                    }
+                }
+            } else {
+                if (isset(self::$fds[$fd])) {
+                    echo PHP_EOL.'On Disconnect: Clearing OpenSwoole-based Timers for Connection-'.$fd.PHP_EOL;
+                    $fd_timers = self::$fds[$fd];
+                    foreach ($fd_timers as $fd_timer){
+                        if (oswTimer::exists($fd_timer)) {
+                            echo PHP_EOL."In Disconnect: clearing timer: ".$fd_timer.PHP_EOL;
+                            oswTimer::clear($fd_timer);
+                        }
+                    }
+                }
+            }
+            unset(self::$fds[$fd]);
         });
 
 // The Request event closure callback is passed the context of $server
